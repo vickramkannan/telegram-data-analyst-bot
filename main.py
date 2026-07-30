@@ -41,13 +41,72 @@ def write_log(question, answer):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+async def get_available_model():
+    """
+    Ask Google which Gemini models this API key can actually use.
+    Prefer a strong Flash model, then fall back to any model supporting
+    generateContent.
+    """
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models"
+        f"?key={GEMINI_API_KEY}"
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+        data = response.json()
+
+    models = data.get("models", [])
+
+    supported = []
+
+    for model in models:
+        actions = model.get("supportedGenerationMethods", [])
+
+        if "generateContent" in actions:
+            name = model.get("name", "")
+
+            if name.startswith("models/"):
+                name = name[len("models/"):]
+
+            supported.append(name)
+
+    if not supported:
+        raise RuntimeError(
+            "No Gemini model supporting generateContent is available "
+            "for this API key."
+        )
+
+    # Prefer models suitable for this data-analysis agent.
+    preferred = [
+        "gemini-3.1-flash-lite",
+        "gemini-3-flash",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash"
+    ]
+
+    for wanted in preferred:
+        if wanted in supported:
+            return wanted
+
+    # Otherwise use the first available generateContent model.
+    return supported[0]
+
+
 async def ask_gemini(question):
+
+    model = await get_available_model()
+
     prompt = """
 You are a careful data-analysis agent.
 
 Solve the user's question accurately.
 
 Rules:
+
 1. Return ONLY valid JSON.
 2. Do not use markdown.
 3. Do not add explanations outside JSON.
@@ -58,14 +117,15 @@ Rules:
 8. Perform calculations carefully.
 9. For multi-turn conversations, answer the latest question using relevant earlier context.
 10. Return a JSON value that can be placed directly inside the outer "answer" field.
+11. If the question points to a public dataset, use information available from the question and reliable public sources when possible.
+12. Pay close attention to units, dates, percentages, rankings, averages, and comparisons.
 
 User question:
 """ + question
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.5-flash:generateContent"
-        f"?key={GEMINI_API_KEY}"
+        f"{model}:generateContent"
     )
 
     payload = {
@@ -84,16 +144,48 @@ User question:
         }
     }
 
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json"
+    }
+
     async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(url, json=payload)
+        response = await client.post(
+            url,
+            headers=headers,
+            json=payload
+        )
+
         response.raise_for_status()
 
         data = response.json()
 
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        candidates = data.get("candidates", [])
+
+        if not candidates:
+            raise RuntimeError(
+                f"Gemini returned no candidates: {data}"
+            )
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+
+        if not parts:
+            raise RuntimeError(
+                f"Gemini returned no content: {data}"
+            )
+
+        text = parts[0].get("text", "").strip()
+
+        if not text:
+            raise RuntimeError(
+                f"Gemini returned empty text: {data}"
+            )
+
+        return text
 
 
 async def handle_message(update: Update, context):
+
     if not update.message or not update.message.text:
         return
 
@@ -141,6 +233,7 @@ async def health():
 
 @app.get("/run.jsonl", response_class=PlainTextResponse)
 async def logs():
+
     if not os.path.exists(LOG_FILE):
         return ""
 
@@ -150,10 +243,15 @@ async def logs():
 
 @app.post("/telegram")
 async def telegram_endpoint(request: Request):
+
     await ensure_initialized()
 
     data = await request.json()
-    update = Update.de_json(data, application.bot)
+
+    update = Update.de_json(
+        data,
+        application.bot
+    )
 
     await application.process_update(update)
 
