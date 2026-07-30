@@ -15,6 +15,16 @@ LOG_FILE = "run.jsonl"
 
 application = Application.builder().token(BOT_TOKEN).build()
 
+_initialized = False
+
+
+async def ensure_initialized():
+    global _initialized
+
+    if not _initialized:
+        await application.initialize()
+        _initialized = True
+
 
 def write_log(question, answer):
     record = {
@@ -74,12 +84,13 @@ async def logs():
 
 
 @app.post("/telegram")
-async def telegram_webhook(request: Request):
+async def telegram_endpoint(request: Request):
+    await ensure_initialized()
+
     data = await request.json()
 
     update = Update.de_json(data, application.bot)
 
-    await application.initialize()
     await application.process_update(update)
 
     return {"ok": True}
