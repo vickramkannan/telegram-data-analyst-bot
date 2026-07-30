@@ -12,13 +12,12 @@ from telegram.ext import Application, MessageHandler, filters
 app = FastAPI()
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 LOG_FILE = "run.jsonl"
 LOG_URL = "https://telegram-data-analyst-bot-62fo.onrender.com/run.jsonl"
 
 application = Application.builder().token(BOT_TOKEN).build()
-
 _initialized = False
 
 
@@ -42,61 +41,56 @@ def write_log(question, answer):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-async def ask_openai(question):
-    system_prompt = """
+async def ask_gemini(question):
+    prompt = """
 You are a careful data-analysis agent.
 
-The user will give you a data-analysis question.
+Solve the user's question accurately.
 
-Your job is to solve the question as accurately as possible.
-
-Important rules:
+Rules:
 1. Return ONLY valid JSON.
 2. Do not use markdown.
-3. Do not add explanations outside the JSON.
+3. Do not add explanations outside JSON.
 4. Follow the exact answer structure requested by the user.
-5. If the user explicitly asks for a JSON shape, use that exact shape inside "answer".
-6. Do not invent data.
-7. If the question contains data inline, calculate from that data.
-8. If the question provides a public dataset URL, retrieve and analyze it when possible.
-9. For calculations, actually calculate rather than guessing.
-10. Preserve numbers accurately.
-"""
+5. If the user asks for a particular JSON structure, follow it exactly.
+6. If data is provided inline, calculate from that data.
+7. Do not invent facts or numbers.
+8. Perform calculations carefully.
+9. For multi-turn conversations, answer the latest question using relevant earlier context.
+10. Return a JSON value that can be placed directly inside the outer "answer" field.
+
+User question:
+""" + question
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash:generateContent"
+        f"?key={GEMINI_API_KEY}"
+    )
 
     payload = {
-        "model": "gpt-5-mini",
-        "messages": [
+        "contents": [
             {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": question
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
             }
         ],
-        "temperature": 0
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json"
+        }
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload
-        )
-
+        response = await client.post(url, json=payload)
         response.raise_for_status()
 
         data = response.json()
 
-        content = data["choices"][0]["message"]["content"].strip()
-
-        return content
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
 async def handle_message(update: Update, context):
@@ -106,9 +100,8 @@ async def handle_message(update: Update, context):
     question = update.message.text
 
     try:
-        raw_answer = await ask_openai(question)
+        raw_answer = await ask_gemini(question)
 
-        # Remove accidental markdown code fences.
         if raw_answer.startswith("```"):
             raw_answer = raw_answer.replace("```json", "", 1)
             raw_answer = raw_answer.replace("```", "")
@@ -128,7 +121,6 @@ async def handle_message(update: Update, context):
         "log_url": LOG_URL
     }
 
-    # Telegram receives exactly the JSON object.
     await update.message.reply_text(
         json.dumps(final_response, ensure_ascii=False)
     )
@@ -161,7 +153,6 @@ async def telegram_endpoint(request: Request):
     await ensure_initialized()
 
     data = await request.json()
-
     update = Update.de_json(data, application.bot)
 
     await application.process_update(update)
