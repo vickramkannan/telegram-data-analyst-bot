@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-telegram-bot
+httpx
+pandas
+numpy
+openpyxl
+python-dotenv
